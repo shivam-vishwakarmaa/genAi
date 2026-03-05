@@ -4,28 +4,31 @@ const multer = require("multer");
 const { z } = require("zod");
 const { PDFParse } = require("pdf-parse");
 const vision = require("@google-cloud/vision");
+
 const app = express();
 const port = 3000;
 
+// Initialize Google Vision Client
+const client = new vision.ImageAnnotatorClient({
+  keyFilename: "./key.json",
+});
+
 app.use(cors());
 app.use(express.json());
-
 const upload = multer({ storage: multer.memoryStorage() });
 
-// --- IN-MEMORY VECTOR DATABASE ---
 global.vectorDB = [];
 
 const chatSchema = z.object({
   question: z.string().min(1, "Question cannot be empty"),
 });
 
-// Helper 1: Break text into chunks
+// Helper: Text Chunking
 function chunkText(text, chunkSize = 500) {
   const cleanText = text.replace(/\n+/g, " ").replace(/\s+/g, " ").trim();
   const words = cleanText.split(" ");
   let chunks = [];
   let currentChunk = [];
-
   for (let word of words) {
     currentChunk.push(word);
     if (currentChunk.join(" ").length >= chunkSize) {
@@ -33,25 +36,22 @@ function chunkText(text, chunkSize = 500) {
       currentChunk = [];
     }
   }
-  if (currentChunk.length > 0) {
-    chunks.push(currentChunk.join(" "));
-  }
+  if (currentChunk.length > 0) chunks.push(currentChunk.join(" "));
   return chunks;
 }
 
-// Helper 2: Get Embeddings from Ollama
+// Helper: Local Ollama Embeddings
 async function getEmbedding(text) {
   const response = await fetch("http://localhost:11434/api/embeddings", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: "nomic-embed-text", prompt: text }),
   });
-  if (!response.ok) throw new Error("Ollama error");
   const data = await response.json();
   return data.embedding;
 }
 
-// Helper 3: Cosine Similarity (Math to find the closest matching text)
+// Helper: Search Logic
 function cosineSimilarity(vecA, vecB) {
   let dotProduct = 0,
     normA = 0,
@@ -64,37 +64,26 @@ function cosineSimilarity(vecA, vecB) {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-const client = new vision.ImageAnnotatorClient({
-  keyFilename: "./key.json",
-});
-
-// Endpoint 1: Upload & Store
+// Endpoint 1: Upload (Hybrid Digital + Handwritten OCR)
 app.post("/api/upload", upload.single("document"), async (req, res) => {
   try {
-    if (!req.file || !req.file.buffer)
-      return res.status(400).json({ error: "Invalid PDF" });
-
     console.log(`--- Processing: ${req.file.originalname} ---`);
 
-    // 1. Try standard extraction first
+    // 1. Digital Extract
     const parser = new PDFParse({ data: req.file.buffer });
     const pdfData = await parser.getText();
     let rawText = pdfData.text;
 
-    // 2. Handwriting Check: If standard extraction fails, use Cloud OCR
-    if (!rawText || rawText.trim().length < 10) {
-      console.log("No digital text found. Starting Handwriting OCR...");
-
-      // We send the PDF buffer directly to Google Vision
+    // 2. Cloud OCR Fallback for Handwriting
+    if (!rawText || rawText.trim().length < 15) {
+      console.log("No text found. Using Google Vision OCR...");
       const [result] = await client.documentTextDetection(req.file.buffer);
       rawText = result.fullTextAnnotation ? result.fullTextAnnotation.text : "";
-
-      if (!rawText)
-        throw new Error("OCR could not find any text in this handwriting.");
-      console.log("Handwriting OCR Successful!");
     }
 
-    // 3. Continue with your working Chunking and Embedding logic
+    if (!rawText)
+      return res.status(400).json({ error: "Could not read PDF content." });
+
     const chunks = chunkText(rawText);
     global.vectorDB = [];
 
@@ -109,78 +98,49 @@ app.post("/api/upload", upload.single("document"), async (req, res) => {
 
     res
       .status(200)
-      .json({ message: `Successfully processed ${chunks.length} sections!` });
+      .json({
+        message: `Ready! Processed ${chunks.length} handwritten sections.`,
+      });
   } catch (error) {
-    console.error("Upload Error:", error);
-    res.status(500).json({ error: "Failed to read document." });
+    console.error(error);
+    res.status(500).json({ error: "Upload failed." });
   }
 });
 
-// Endpoint 2: The RAG Chat Engine
+// Endpoint 2: Local AI Chat
 app.post("/api/chat", async (req, res) => {
   try {
     const { question } = chatSchema.parse(req.body);
+    const qEmbed = await getEmbedding(question);
 
-    if (global.vectorDB.length === 0) {
-      return res.status(400).json({ error: "Please upload a document first." });
-    }
-
-    // 1. Convert user question to numbers
-    const questionEmbedding = await getEmbedding(question);
-
-    // 2. Search Database (Score all chunks)
-    const scoredChunks = global.vectorDB.map((chunk) => ({
-      ...chunk,
-      score: cosineSimilarity(questionEmbedding, chunk.embedding),
+    const scored = global.vectorDB.map((c) => ({
+      ...c,
+      score: cosineSimilarity(qEmbed, c.embedding),
     }));
+    scored.sort((a, b) => b.score - a.score);
+    const top = scored.slice(0, 3);
 
-    // 3. Get Top 3 most relevant chunks
-    scoredChunks.sort((a, b) => b.score - a.score);
-    const topChunks = scoredChunks.slice(0, 3);
+    const context = top.map((c) => `[${c.id}]: ${c.text}`).join("\n\n");
+    const prompt = `Answer ONLY from these notes. If unknown, say "I don't know".\nNotes:\n${context}\n\nQuestion: ${question}`;
 
-    // 4. Build the Strict Hackathon Prompt
-    const contextText = topChunks
-      .map((c) => `[${c.id}]: ${c.text}`)
-      .join("\n\n");
-
-    const prompt = `You are a strict study assistant. Answer the user's question based ONLY on the provided notes below. If the notes do not contain the answer, say "I don't know". Do NOT make up information.
-
-Notes:
-${contextText}
-
-Question: ${question}
-
-Answer:`;
-
-    // 5. Generate Answer via Ollama (Using phi3)
     const response = await fetch("http://localhost:11434/api/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "phi3",
-        prompt: prompt,
-        stream: false,
-      }),
+      body: JSON.stringify({ model: "phi3", prompt, stream: false }),
     });
 
     const aiData = await response.json();
-
-    // THE FIX: If Ollama throws an error (like missing model), send the error to the chat!
-    const finalAnswer = aiData.response || `Ollama Error: ${aiData.error}`;
-
-    // 6. Format source citations
-    const sources = topChunks.map((c) => c.id).join(", ");
-
-    res.status(200).json({
-      answer: finalAnswer,
-      sources: sources,
-    });
+    res
+      .status(200)
+      .json({
+        answer: aiData.response,
+        sources: top.map((c) => c.id).join(", "),
+      });
   } catch (error) {
-    console.error("Chat endpoint error:", error);
-    res.status(500).json({ error: "Failed to process chat request." });
+    res.status(500).json({ error: "Chat error." });
   }
 });
 
 app.listen(port, () =>
-  console.log(`🚀 Local AI Server running at http://localhost:${port}`),
+  console.log(`🚀 Final Pipeline Running at http://localhost:${port}`),
 );

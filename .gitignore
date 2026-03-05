@@ -5,3 +5,7 @@ build/
 
 backend/node_modules/
 mobile/node_modules/
+
+*.json
+backend/key.json
+.env
