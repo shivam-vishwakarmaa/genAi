@@ -11,6 +11,10 @@ import {
 } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 
+const API_BASE_URL =
+  process.env.EXPO_PUBLIC_API_BASE_URL ||
+  (Platform.OS === "android" ? "http://10.0.2.2:3000" : "http://localhost:3000");
+
 export default function App() {
   const [pdfFile, setPdfFile] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -55,7 +59,7 @@ export default function App() {
 
         // 2. Send it to your Express backend
         // Note: Because we are running on the web simulator on the same laptop, 'localhost' works perfectly.
-        const response = await fetch("http://localhost:3000/api/upload", {
+        const response = await fetch(`${API_BASE_URL}/api/upload`, {
           method: "POST",
           body: formData,
           headers: {
@@ -76,7 +80,10 @@ export default function App() {
         } else {
           setMessages((prev) => [
             ...prev,
-            { text: `System: Error uploading! ${data.error}`, isUser: false },
+            {
+              text: `System: Error uploading! ${data.error || "Unknown upload error."}`,
+              isUser: false,
+            },
           ]);
         }
       }
@@ -85,7 +92,7 @@ export default function App() {
       setMessages((prev) => [
         ...prev,
         {
-          text: `System: Critical error uploading document. Is the backend running?`,
+          text: `System: Critical upload error. Check backend, Ollama, and API URL.`,
           isUser: false,
         },
       ]);
@@ -113,7 +120,7 @@ export default function App() {
     ]);
 
     try {
-      const response = await fetch("http://localhost:3000/api/chat", {
+      const response = await fetch(`${API_BASE_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: userMessage }),
@@ -133,7 +140,10 @@ export default function App() {
             },
           ];
         } else {
-          return [...filtered, { text: `Error: ${data.error}`, isUser: false }];
+          return [
+            ...filtered,
+            { text: `Error: ${data.error || "Unknown chat error."}`, isUser: false },
+          ];
         }
       });
     } catch (error) {
@@ -141,7 +151,10 @@ export default function App() {
         const filtered = prev.filter((msg) => !msg.isLoading);
         return [
           ...filtered,
-          { text: "Critical error connecting to AI.", isUser: false },
+          {
+            text: "Critical chat error. Check backend, Ollama, and API URL.",
+            isUser: false,
+          },
         ];
       });
     }
