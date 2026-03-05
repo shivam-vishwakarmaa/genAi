@@ -144,16 +144,19 @@ Answer:`;
 
     const aiData = await response.json();
 
+    // THE FIX: If Ollama throws an error (like missing model), send the error to the chat!
+    const finalAnswer = aiData.response || `Ollama Error: ${aiData.error}`;
+
     // 6. Format source citations
     const sources = topChunks.map((c) => c.id).join(", ");
 
     res.status(200).json({
-      answer: aiData.response,
+      answer: finalAnswer,
       sources: sources,
     });
   } catch (error) {
-    console.error("Chat Error:", error);
-    res.status(500).json({ error: "Failed to generate answer." });
+    console.error("Chat endpoint error:", error);
+    res.status(500).json({ error: "Failed to process chat request." });
   }
 });
 
