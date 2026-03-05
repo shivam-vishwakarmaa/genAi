@@ -11,6 +11,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@google-cloud/vision": "^5.3.4",
     "chromadb": "^3.3.1",
     "cors": "^2.8.6",
     "express": "^5.2.1",

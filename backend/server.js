@@ -3,7 +3,7 @@ const cors = require("cors");
 const multer = require("multer");
 const { z } = require("zod");
 const { PDFParse } = require("pdf-parse");
-
+const vision = require("@google-cloud/vision");
 const app = express();
 const port = 3000;
 
@@ -64,18 +64,39 @@ function cosineSimilarity(vecA, vecB) {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
+const client = new vision.ImageAnnotatorClient({
+  keyFilename: "./key.json",
+});
+
 // Endpoint 1: Upload & Store
 app.post("/api/upload", upload.single("document"), async (req, res) => {
   try {
     if (!req.file || !req.file.buffer)
       return res.status(400).json({ error: "Invalid PDF" });
 
+    console.log(`--- Processing: ${req.file.originalname} ---`);
+
+    // 1. Try standard extraction first
     const parser = new PDFParse({ data: req.file.buffer });
     const pdfData = await parser.getText();
-    await parser.destroy();
+    let rawText = pdfData.text;
 
-    const chunks = chunkText(pdfData.text);
-    global.vectorDB = []; // Clear old doc
+    // 2. Handwriting Check: If standard extraction fails, use Cloud OCR
+    if (!rawText || rawText.trim().length < 10) {
+      console.log("No digital text found. Starting Handwriting OCR...");
+
+      // We send the PDF buffer directly to Google Vision
+      const [result] = await client.documentTextDetection(req.file.buffer);
+      rawText = result.fullTextAnnotation ? result.fullTextAnnotation.text : "";
+
+      if (!rawText)
+        throw new Error("OCR could not find any text in this handwriting.");
+      console.log("Handwriting OCR Successful!");
+    }
+
+    // 3. Continue with your working Chunking and Embedding logic
+    const chunks = chunkText(rawText);
+    global.vectorDB = [];
 
     for (let i = 0; i < chunks.length; i++) {
       const embedding = await getEmbedding(chunks[i]);
@@ -90,8 +111,8 @@ app.post("/api/upload", upload.single("document"), async (req, res) => {
       .status(200)
       .json({ message: `Successfully processed ${chunks.length} sections!` });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to process document." });
+    console.error("Upload Error:", error);
+    res.status(500).json({ error: "Failed to read document." });
   }
 });
 
