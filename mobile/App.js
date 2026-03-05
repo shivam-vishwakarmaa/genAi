@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { StyleSheet, Text, View, TextInput, TouchableOpacity, ScrollView, SafeAreaView } from 'react-native';
+import { StyleSheet, Text, View, TextInput, TouchableOpacity, ScrollView, SafeAreaView, Platform} from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 
 export default function App() {
@@ -8,14 +8,60 @@ export default function App() {
   const [inputText, setInputText] = useState('');
 
   // Handles the PDF selection
+  // Handles the PDF selection and uploads it to the local backend
   const pickDocument = async () => {
-    let result = await DocumentPicker.getDocumentAsync({
-      type: 'application/pdf',
-    });
-    
-    if (!result.canceled) {
-      setPdfFile(result.assets[0]);
-      setMessages([...messages, { text: `System: "${result.assets[0].name}" selected. Ready to process.`, isUser: false }]);
+    try {
+      let result = await DocumentPicker.getDocumentAsync({
+        type: 'application/pdf',
+      });
+      
+      if (!result.canceled) {
+        const file = result.assets[0];
+        setPdfFile(file);
+        
+        // Let the user know the upload started
+        setMessages(prev => [...prev, { text: `System: "${file.name}" selected. Uploading to local AI server...`, isUser: false }]);
+
+        // 1. Prepare the file data
+        const formData = new FormData();
+        
+        // React Native needs the uri, name, and type to properly construct the file blob
+        if (Platform.OS === 'web') {
+          // On the web, Expo hides the raw file inside the 'file' property
+          formData.append('document', file.file);
+        } else {
+          // On a physical phone, we construct it like this
+          formData.append('document', {
+            uri: file.uri,
+            name: file.name,
+            type: file.mimeType || 'application/pdf',
+          });
+        }
+
+        // 2. Send it to your Express backend
+        // Note: Because we are running on the web simulator on the same laptop, 'localhost' works perfectly.
+        const response = await fetch('http://localhost:3000/api/upload', {
+          method: 'POST',
+          body: formData,
+          headers: {
+            'Accept': 'application/json',
+            // Note: We do NOT set 'Content-Type': 'multipart/form-data' here. 
+            // Fetch automatically sets it along with the correct boundary string.
+          },
+        });
+
+        const data = await response.json();
+        
+        // 3. Update the chat UI based on the backend response
+        if (response.ok) {
+           setMessages(prev => [...prev, { text: `System: Success! ${data.message}`, isUser: false }]);
+        } else {
+           setMessages(prev => [...prev, { text: `System: Error uploading! ${data.error}`, isUser: false }]);
+        }
+      }
+    } catch (error) {
+      console.error("Upload error:", error);
+      setMessages(prev => [...prev, { text: `System: Critical error uploading document. Is the backend running?`, isUser: false }]);
     }
   };
 
